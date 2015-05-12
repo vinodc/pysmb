@@ -537,7 +537,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
         else:
             connectSrvSvc(self.connected_trees[path])
 
-    def _listPath_SMB2(self, service_name, path, callback, errback, search, pattern, timeout = 30):
+    def _listPath_SMB2(self, service_name, path, callback, errback, search, pattern, index, timeout = 30):
         if not self.has_authenticated:
             raise NotReadyError('SMB connection not authenticated')
 
@@ -581,9 +581,13 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
                 errback(OperationFailure('Failed to list %s on %s: Unable to open directory' % ( path, service_name ), messages_history))
 
         def sendQuery(tid, fid, data_buf):
+            flags = 0
+            if index > 0:
+                flags |= 0x04 # SMB2_INDEX_SPECIFIED
             m = SMB2Message(SMB2QueryDirectoryRequest(fid, pattern,
+                                                      findex = index,
                                                       info_class = 0x03,   # FileBothDirectoryInformation
-                                                      flags = 0,
+                                                      flags = flags,
                                                       output_buf_len = self.max_transact_size))
             m.tid = tid
             self._sendSMBMessage(m)
@@ -1776,7 +1780,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
         self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, connectCB, errback, path = path)
         messages_history.append(m)
 
-    def _listPath_SMB1(self, service_name, path, callback, errback, search, pattern, timeout = 30):
+    def _listPath_SMB1(self, service_name, path, callback, errback, search, pattern, index, timeout = 30):
         if not self.has_authenticated:
             raise NotReadyError('SMB connection not authenticated')
 

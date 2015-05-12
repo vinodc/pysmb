@@ -153,7 +153,7 @@ class SMBConnection(SMB):
 
     def listPath(self, service_name, path,
                  search = SMB_FILE_ATTRIBUTE_READONLY | SMB_FILE_ATTRIBUTE_HIDDEN | SMB_FILE_ATTRIBUTE_SYSTEM | SMB_FILE_ATTRIBUTE_DIRECTORY | SMB_FILE_ATTRIBUTE_ARCHIVE,
-                 pattern = '*', timeout = 30):
+                 pattern = '*', index = 0, timeout = 30):
         """
         Retrieve a directory listing of files/folders at *path*
 
@@ -162,6 +162,7 @@ class SMBConnection(SMB):
         :param integer search: integer value made up from a bitwise-OR of *SMB_FILE_ATTRIBUTE_xxx* bits (see smb_constants.py).
                                The default *search* value will query for all read-only, hidden, system, archive files and directories.
         :param string/unicode pattern: the filter to apply to the results before returning to the client.
+        :param integer index: File Index Byte Offset to begin enumeration.
         :return: A list of :doc:`smb.base.SharedFile<smb_SharedFile>` instances.
         """
         if not self.sock:
@@ -179,7 +180,7 @@ class SMBConnection(SMB):
 
         self.is_busy = True
         try:
-            self._listPath(service_name, path, cb, eb, search = search, pattern = pattern, timeout = timeout)
+            self._listPath(service_name, path, cb, eb, search = search, pattern = pattern, index = index, timeout = timeout)
             while self.is_busy:
                 self._pollForNetBIOSPacket(timeout)
         finally:

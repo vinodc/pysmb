@@ -665,9 +665,10 @@ class SMB2QueryDirectoryRequest(Structure):
     STRUCTURE_FORMAT = "<HBBI16sHHI"
     STRUCTURE_SIZE = struct.calcsize(STRUCTURE_FORMAT)
 
-    def __init__(self, fid, filename, info_class, flags, output_buf_len):
+    def __init__(self, fid, filename, findex, info_class, flags, output_buf_len):
         self.fid = fid
         self.filename = filename
+        self.findex = findex 
         self.info_class = info_class
         self.flags = flags
         self.output_buf_len = output_buf_len
@@ -681,7 +682,7 @@ class SMB2QueryDirectoryRequest(Structure):
                                    33,   # Structure size. Must be 33 as mandated by [MS-SMB2] 2.2.33
                                    self.info_class,   # FileInformationClass
                                    self.flags,        # Flags
-                                   0,                 # FileIndex
+                                   self.findex,       # FileIndex
                                    self.fid,          # FileID
                                    SMB2Message.HEADER_SIZE + self.STRUCTURE_SIZE,  # FileNameOffset
                                    len(self.filename)*2,
