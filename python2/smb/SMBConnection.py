@@ -224,7 +224,7 @@ class SMBConnection(SMB):
     def getAttributes(self, service_name, path, timeout = 30):
         """
         Retrieve information about the file at *path* on the *service_name*.
-        
+
         :param string/unicode service_name: the name of the shared folder for the *path*
         :param string/unicode path: Path of the file on the remote server. If the file cannot be opened for reading, an :doc:`OperationFailure<smb_exceptions>` will be raised.
         :return: A :doc:`smb.base.SharedFile<smb_SharedFile>` instance containing the attributes of the file.
@@ -301,7 +301,7 @@ class SMBConnection(SMB):
             self.is_busy = False
 
         return results[0]
-    
+
     def storeFile(self, service_name, path, file_obj, timeout = 30):
         """
         Store the contents of the *file_obj* at *path* on the *service_name*.
@@ -490,6 +490,33 @@ class SMBConnection(SMB):
 
         return results[0]
 
+    def notify(self, service_name, path, watch_subdirs = 0):
+        """
+        Watch for changes in the folder specified by *path*
+        """
+        if not self.sock:
+            raise NotConnectedError('Not connected to server')
+
+        results = []
+
+        def cb(entries):
+            self.is_busy = False
+            results.extend(entries)
+
+        def eb(failure):
+            self.is_busy = False
+            raise failure
+
+        self.is_busy = True
+        try:
+            self._notify(service_name, path, cb, eb, watch_subdirs = watch_subdirs)
+            while self.is_busy:
+                self._pollForNetBIOSPacket(timeout = float('inf'))
+        finally:
+            self.is_busy = False
+
+        return results
+
     #
     # Protected Methods
     #
@@ -498,6 +525,9 @@ class SMBConnection(SMB):
         expiry_time = time.time() + timeout
         read_len = 4
         data = ''
+
+        if timeout == float('inf'):
+            timeout = None
 
         while read_len > 0:
             try:

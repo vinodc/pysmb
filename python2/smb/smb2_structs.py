@@ -167,6 +167,8 @@ class SMB2Message:
             self.payload = SMB2NegotiateResponse()
         elif self.command == SMB2_COM_ECHO:
             self.payload = SMB2EchoResponse()
+        elif self.command == SMB2_COM_CHANGE_NOTIFY:
+            self.payload = SMB2ChangeNotifyResponse()
 
     @property
     def isAsync(self):
@@ -846,3 +848,53 @@ class SMB2EchoResponse(Structure):
 
     def decode(self, message):
         pass
+
+class SMB2ChangeNotifyRequest(Structure):
+    """
+    References:
+    ===========
+    - [MS-SMB2]: 2.2.35
+    """
+
+    STRUCTURE_FORMAT = "<HHI16sII"
+    STRUCTURE_SIZE = struct.calcsize(STRUCTURE_FORMAT)
+
+    def __init__(self, fid, completion_filter, flags = 0, output_buf_len = 0):
+        self.fid = fid
+        self.flags = flags
+        self.output_buf_len = output_buf_len
+        self.completion_filter = completion_filter
+
+    def initMessage(self, message):
+        Structure.initMessage(self, message)
+        message.command = SMB2_COM_CHANGE_NOTIFY
+
+    def prepare(self, message):
+        message.data = struct.pack(self.STRUCTURE_FORMAT,
+                                   32, # Structure size. Must be 32.
+                                   self.flags,
+                                   self.output_buf_len,
+                                   self.fid,
+                                   self.completion_filter,
+                                   0) # Reserved. Must be 0.
+
+class SMB2ChangeNotifyResponse(Structure):
+    """
+    Contains information about the SMB2 CHANGE_NOTIFY response from the server.
+
+    References:
+    ===========
+    - [MS-SMB2]: 2.2.36
+    """
+
+    STRUCTURE_FORMAT = "<HHI"
+    STRUCTURE_SIZE = struct.calcsize(STRUCTURE_FORMAT)
+
+    def decode(self, message):
+        assert message.command == SMB2_COM_CHANGE_NOTIFY
+
+        if message.status == 0 or message.status == 0x0000010C:
+            struct_size, offset, self.data_length = struct.unpack(self.STRUCTURE_FORMAT,
+                                                                  message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])
+            self.data = message.raw_data[offset:offset+self.data_length]
+

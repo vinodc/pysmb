@@ -204,6 +204,7 @@ class SMB(NMBSession):
         self._deleteDirectory = self._deleteDirectory_SMB2
         self._rename = self._rename_SMB2
         self._echo = self._echo_SMB2
+        self._notify = self._notify_SMB2
 
     def _getNextRPCCallID(self):
         self.next_rpc_call_id += 1
@@ -664,7 +665,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
     def _getAttributes_SMB2(self, service_name, path, callback, errback, timeout = 30):
         if not self.has_authenticated:
             raise NotReadyError('SMB connection not authenticated')
-    
+
         expiry_time = time.time() + timeout
         path = path.replace('/', '\\')
         if path.startswith('\\'):
@@ -1227,7 +1228,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             old_path = old_path[1:]
         if old_path.endswith('\\'):
             old_path = old_path[:-1]
-            
+
         def sendCreate(tid):
             create_context_data = binascii.unhexlify("""
 28 00 00 00 10 00 04 00 00 00 18 00 10 00 00 00
@@ -1412,6 +1413,135 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
         self.pending_requests[m.mid] = _PendingRequest(m.mid, int(time.time()) + timeout, echoCB, errback)
         messages_history.append(m)
 
+    def _notify_SMB2(self, service_name, path, callback, errback, watch_subdirs = 0):
+        if not self.has_authenticated:
+            raise NotReadyError('SMB connection not authenticated')
+
+        #expiry_time = time.time() + timeout
+        expiry_time = None
+        path = path.replace('/', '\\')
+        if path.startswith('\\'):
+            path = path[1:]
+        if path.endswith('\\'):
+            path = path[:-1]
+
+        messages_history = []
+
+        def sendCreate(tid):
+            create_context_data = binascii.unhexlify("""
+28 00 00 00 10 00 04 00 00 00 18 00 10 00 00 00
+44 48 6e 51 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 18 00 00 00 10 00 04 00
+00 00 18 00 00 00 00 00 4d 78 41 63 00 00 00 00
+00 00 00 00 10 00 04 00 00 00 18 00 00 00 00 00
+51 46 69 64 00 00 00 00
+""".replace(' ', '').replace('\n', ''))
+            m = SMB2Message(SMB2CreateRequest(path,
+                                              file_attributes = 0,
+                                              access_mask = FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                                              share_access = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                              oplock = SMB2_OPLOCK_LEVEL_NONE,
+                                              impersonation = SEC_IMPERSONATE,
+                                              create_options = FILE_DIRECTORY_FILE,
+                                              create_disp = FILE_OPEN,
+                                              create_context_data = create_context_data))
+            m.tid = tid
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, createCB, errback)
+            messages_history.append(m)
+
+        def createCB(create_message, **kwargs):
+            messages_history.append(create_message)
+            if create_message.status == 0:
+                sendNotify(create_message.tid, create_message.payload.fid)
+            else:
+                errback(OperationFailure('Failed to watch %s on %s: Unable to open directory' % ( path, service_name ), messages_history))
+
+        def sendNotify(tid, fid):
+            completion_filter = (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                                 FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
+                                 FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
+                                 FILE_NOTIFY_CHANGE_LAST_ACCESS | FILE_NOTIFY_CHANGE_EA | FILE_NOTIFY_CHANGE_SECURITY |
+                                 FILE_NOTIFY_CHANGE_STREAM_NAME | FILE_NOTIFY_CHANGE_STREAM_SIZE |
+                                 FILE_NOTIFY_CHANGE_STREAM_WRITE)
+            m = SMB2Message(SMB2ChangeNotifyRequest(fid, completion_filter, flags = int(watch_subdirs),
+                                                    output_buf_len = self.max_transact_size))
+            m.tid = tid
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, notifyCB, errback, fid = fid)
+            messages_history.append(m)
+
+        def notifyCB(query_message, **kwargs):
+            messages_history.append(query_message)
+            fid = kwargs['fid']
+            print('Received response with status code: %s' % query_message.status)
+            if query_message.status == 0 or query_message.status == 0x0000010C:
+                results = decodeNotifyStruct(query_message.payload.data)
+                closeFid(query_message.tid, fid, results = results)
+            elif query_message.status == 0x0103:
+                import time
+                self.pending_requests[query_message.mid] = _PendingRequest(query_message.mid, expiry_time, notifyCB, errback, fid = fid)
+            else:
+                closeFid(query_message.tid, fid, error = query_message.status)
+
+        def decodeNotifyStruct(data):
+            # FILE_NOTIFY_INFORMATION structure. See [MS-FSCC]: 2.4.42
+            struct_format = "<III"
+            struct_size = struct.calcsize(struct_format)
+            data_len = len(data)
+            offset = 0
+            results = []
+
+            while offset < data_len:
+                offset2 = offset + struct_size
+                assert offset2 <= data_len
+
+                next_offset, action, filename_len = struct.unpack(struct_format, data[offset:offset+struct_size])
+
+                assert offset2 + filename_len <= data_len
+                filename = data[offset2:offset2+filename_len].decode('UTF-16LE')
+
+                results.append({
+                    'event': action,
+                    'filename': filename
+                })
+
+                if next_offset:
+                    offset += next_offset
+                else:
+                    break
+
+            return results
+
+        def closeFid(tid, fid, results = None, error = None):
+            m = SMB2Message(SMB2CloseRequest(fid))
+            m.tid = tid
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, closeCB, errback, results = results, error = error)
+            messages_history.append(m)
+
+        def closeCB(close_message, **kwargs):
+            if kwargs['results'] is not None:
+                callback(kwargs['results'])
+            elif kwargs['error'] is not None:
+                # Might have to update error msg below
+                errback(OperationFailure('Failed to watch %s on %s: Notify request failed with errorcode 0x%08x' % ( path, service_name, kwargs['error'] ), messages_history))
+
+        if not self.connected_trees.has_key(service_name):
+            def connectCB(connect_message, **kwargs):
+                messages_history.append(connect_message)
+                if connect_message.status == 0:
+                    self.connected_trees[service_name] = connect_message.tid
+                    sendCreate(connect_message.tid)
+                else:
+                    errback(OperationFailure('Failed to watch %s on %s: Unable to connect to shared device' % ( path, service_name ), messages_history))
+
+            m = SMB2Message(SMB2TreeConnectRequest(r'\\%s\%s' % ( self.remote_name.upper(), service_name )))
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, connectCB, errback, path = service_name)
+            messages_history.append(m)
+        else:
+            sendCreate(self.connected_trees[service_name])
 
     #
     # SMB1 Methods Family
@@ -1957,10 +2087,10 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             self._sendSMBMessage(m)
             self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, dfsReferralCB, errback)
             messages_history.append(m)
-    
+
         def dfsReferralCB(dfs_message, **kwargs):
             sendFindFirst(dfs_message.tid, True)
-    
+
         if not self.connected_trees.has_key(service_name):
             def connectCB(connect_message, **kwargs):
                 messages_history.append(connect_message)
@@ -1991,7 +2121,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
         if path.endswith('\\'):
             path = path[:-1]
         messages_history = [ ]
-    
+
         def sendQuery(tid):
             setup_bytes = struct.pack('<H', 0x0005)  # TRANS2_QUERY_PATH_INFORMATION sub-command. See [MS-CIFS]: 2.2.6.6.1
             params_bytes = \
@@ -2009,7 +2139,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             self._sendSMBMessage(m)
             self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, queryCB, errback)
             messages_history.append(m)
-            
+
         def queryCB(query_message, **kwargs):
             messages_history.append(query_message)
             if not query_message.status.hasError:
@@ -2017,7 +2147,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
                 info_size = struct.calcsize(info_format)
                 create_time, last_access_time, last_write_time, last_attr_change_time, \
                 file_attributes, _, alloc_size, file_size = struct.unpack(info_format, query_message.payload.data_bytes[:info_size])
-        
+
                 info = SharedFile(create_time, last_access_time, last_write_time, last_attr_change_time,
                                   file_size, alloc_size, file_attributes, unicode(path), unicode(path))
                 callback(info)
@@ -2039,7 +2169,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             messages_history.append(m)
         else:
             sendQuery(self.connected_trees[service_name])
-    
+
     def _retrieveFile_SMB1(self, service_name, path, file_obj, callback, errback, timeout = 30):
         return self._retrieveFileFromOffset(service_name, path, file_obj, callback, errback, 0L, -1L, timeout)
 
@@ -2133,9 +2263,9 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             messages_history.append(m)
         else:
             sendOpen(self.connected_trees[service_name])
-            
-    def _storeFile_SMB1(self, service_name, path, file_obj, callback, errback, timeout = 30):   
-        self._storeFileFromOffset_SMB1(service_name, path, file_obj, callback, errback, 0L, True, timeout) 
+
+    def _storeFile_SMB1(self, service_name, path, file_obj, callback, errback, timeout = 30):
+        self._storeFileFromOffset_SMB1(service_name, path, file_obj, callback, errback, 0L, True, timeout)
 
     def _storeFileFromOffset_SMB1(self, service_name, path, file_obj, callback, errback, starting_offset, truncate = False, timeout = 30):
         if not self.has_authenticated:
@@ -2538,7 +2668,7 @@ class SharedFile:
     def isReadOnly(self):
         """A convenient property to return True if this file resource is read-only on the remote server"""
         return bool(self.file_attributes & ATTR_READONLY)
-    
+
     def __unicode__(self):
         return u'Shared file: %s (FileSize:%d bytes, isDirectory:%s)' % ( self.filename, self.file_size, self.isDirectory )
 
