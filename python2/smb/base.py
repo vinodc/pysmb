@@ -1413,18 +1413,25 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
         self.pending_requests[m.mid] = _PendingRequest(m.mid, int(time.time()) + timeout, echoCB, errback)
         messages_history.append(m)
 
-    def _notify_SMB2(self, service_name, path, callback, errback, watch_subdirs = 0):
+    def _notify_SMB2(self, service_name, path, callback, errback, watch_subdirs = 0, completion_filter = None):
         if not self.has_authenticated:
             raise NotReadyError('SMB connection not authenticated')
 
-        #expiry_time = time.time() + timeout
-        expiry_time = None
+        if completion_filter is None:
+            completion_filter = (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                                 FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
+                                 FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
+                                 FILE_NOTIFY_CHANGE_LAST_ACCESS | FILE_NOTIFY_CHANGE_EA | FILE_NOTIFY_CHANGE_SECURITY |
+                                 FILE_NOTIFY_CHANGE_STREAM_NAME | FILE_NOTIFY_CHANGE_STREAM_SIZE |
+                                 FILE_NOTIFY_CHANGE_STREAM_WRITE)
+
         path = path.replace('/', '\\')
         if path.startswith('\\'):
             path = path[1:]
         if path.endswith('\\'):
             path = path[:-1]
 
+        expiry_time = None
         messages_history = []
 
         def sendCreate(tid):
@@ -1458,12 +1465,6 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
                 errback(OperationFailure('Failed to watch %s on %s: Unable to open directory' % ( path, service_name ), messages_history))
 
         def sendNotify(tid, fid):
-            completion_filter = (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
-                                 FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
-                                 FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION |
-                                 FILE_NOTIFY_CHANGE_LAST_ACCESS | FILE_NOTIFY_CHANGE_EA | FILE_NOTIFY_CHANGE_SECURITY |
-                                 FILE_NOTIFY_CHANGE_STREAM_NAME | FILE_NOTIFY_CHANGE_STREAM_SIZE |
-                                 FILE_NOTIFY_CHANGE_STREAM_WRITE)
             m = SMB2Message(SMB2ChangeNotifyRequest(fid, completion_filter, flags = int(watch_subdirs),
                                                     output_buf_len = self.max_transact_size))
             m.tid = tid
@@ -1474,12 +1475,10 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
         def notifyCB(query_message, **kwargs):
             messages_history.append(query_message)
             fid = kwargs['fid']
-            print('Received response with status code: %s' % query_message.status)
-            if query_message.status == 0 or query_message.status == 0x0000010C:
+            if query_message.status == 0:
                 results = decodeNotifyStruct(query_message.payload.data)
                 closeFid(query_message.tid, fid, results = results)
-            elif query_message.status == 0x0103:
-                import time
+            elif query_message.status == 0x0103: # STATUS_PENDING
                 self.pending_requests[query_message.mid] = _PendingRequest(query_message.mid, expiry_time, notifyCB, errback, fid = fid)
             else:
                 closeFid(query_message.tid, fid, error = query_message.status)
@@ -1494,16 +1493,22 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
 
             while offset < data_len:
                 offset2 = offset + struct_size
-                assert offset2 <= data_len
+
+                if offset2 > data_len:
+                    errback(OperationFailure('Failed to receive event from %s on %s: Received malformed response packet' % (path, service_name), messages_history))
 
                 next_offset, action, filename_len = struct.unpack(struct_format, data[offset:offset+struct_size])
 
-                assert offset2 + filename_len <= data_len
+                if offset2 + filename_len > data_len:
+                    errback(OperationFailure('Failed to receive event from %s on %s: Unable to decode filename' % (path, service_name), messages_history))
+
                 filename = data[offset2:offset2+filename_len].decode('UTF-16LE')
 
                 results.append({
-                    'event': action,
-                    'filename': filename
+                    'service': service_name,
+                    'event_id': action,
+                    'event_name': FILE_NOTIFY_INFORMATION_NAMES[action],
+                    'path': filename
                 })
 
                 if next_offset:

@@ -490,9 +490,16 @@ class SMBConnection(SMB):
 
         return results[0]
 
-    def notify(self, service_name, path, watch_subdirs = 0):
+    def notify(self, service_name, path, watch_subdirs = False, completion_filter = None):
         """
         Watch for changes in the folder specified by *path*
+
+        :param string/unicode service_name: the name of the shared folder for the *path*
+        :param string/unicode path: path relative to the *service_name* that we want to watch
+        :param boolean watch_subdirs: whether or not to watch changes in subdirectories of *path*
+        :param integer completion_filter: integer value made up from a bitwise-OR of *FILE_NOTIFY_CHANGE_xxx* bits (see smb_constants.py).
+                                            This field determines what changes to monitor. The default *completion_filter* value will
+                                            specify to watch for all changes.
         """
         if not self.sock:
             raise NotConnectedError('Not connected to server')
@@ -509,8 +516,10 @@ class SMBConnection(SMB):
 
         self.is_busy = True
         try:
-            self._notify(service_name, path, cb, eb, watch_subdirs = watch_subdirs)
+            self._notify(service_name, path, cb, eb, watch_subdirs = watch_subdirs,
+                        completion_filter = completion_filter)
             while self.is_busy:
+                # Don't stop polling until we receive a notification response
                 self._pollForNetBIOSPacket(timeout = float('inf'))
         finally:
             self.is_busy = False

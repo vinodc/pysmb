@@ -893,7 +893,7 @@ class SMB2ChangeNotifyResponse(Structure):
     def decode(self, message):
         assert message.command == SMB2_COM_CHANGE_NOTIFY
 
-        if message.status == 0 or message.status == 0x0000010C:
+        if message.status == 0:
             struct_size, offset, self.data_length = struct.unpack(self.STRUCTURE_FORMAT,
                                                                   message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])
             self.data = message.raw_data[offset:offset+self.data_length]
