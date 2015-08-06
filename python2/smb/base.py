@@ -1529,7 +1529,6 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             if kwargs['results'] is not None:
                 callback(kwargs['results'])
             elif kwargs['error'] is not None:
-                # Might have to update error msg below
                 errback(OperationFailure('Failed to watch %s on %s: Notify request failed with errorcode 0x%08x' % ( path, service_name, kwargs['error'] ), messages_history))
 
         if not self.connected_trees.has_key(service_name):
