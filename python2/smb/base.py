@@ -1457,9 +1457,11 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, createCB, errback)
             messages_history.append(m)
 
+        active_tid = [None]
         def createCB(create_message, **kwargs):
             messages_history.append(create_message)
             if create_message.status == 0:
+                active_tid[0] = create_message.tid
                 sendNotify(create_message.tid, create_message.payload.fid)
             else:
                 errback(OperationFailure('Failed to watch %s on %s: Unable to open directory' % ( path, service_name ), messages_history))
@@ -1477,7 +1479,8 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             fid = kwargs['fid']
             if query_message.status == 0:
                 results = decodeNotifyStruct(query_message.payload.data)
-                closeFid(query_message.tid, fid, results = results)
+                callback(results)
+                sendNotify(active_tid[0], fid)
             elif query_message.status == 0x0103: # STATUS_PENDING
                 self.pending_requests[query_message.mid] = _PendingRequest(query_message.mid, expiry_time, notifyCB, errback, fid = fid)
             else:
@@ -1526,9 +1529,7 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             messages_history.append(m)
 
         def closeCB(close_message, **kwargs):
-            if kwargs['results'] is not None:
-                callback(kwargs['results'])
-            elif kwargs['error'] is not None:
+            if kwargs['error'] is not None:
                 errback(OperationFailure('Failed to watch %s on %s: Notify request failed with errorcode 0x%08x' % ( path, service_name, kwargs['error'] ), messages_history))
 
         if not self.connected_trees.has_key(service_name):
